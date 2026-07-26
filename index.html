@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Collaborative code editor</title>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="topbar-room">
+          <span class="brand">Collaborative code editor</span>
+          <button id="room-id" class="room-id" type="button" aria-label="Copy room link"></button>
+        </div>
+        <ul id="presence-list" class="presence-list" aria-label="Who's connected"></ul>
+        <div class="topbar-controls">
+          <select id="language-select" aria-label="Language"></select>
+          <button id="theme-toggle" type="button" aria-label="Toggle dark or light theme"></button>
+        </div>
+      </header>
+      <main id="editor-host" class="editor-host"></main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

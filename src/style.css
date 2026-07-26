@@ -1,0 +1,141 @@
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('/fonts/InstrumentSans-Variable.ttf') format('truetype-variations');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('/fonts/IBMPlexMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root[data-theme='dark'] {
+  --canvas: #14161a;
+  --surface: #1e2127;
+  --border: #2a2e36;
+  --text: #d8dbe0;
+  --muted: #7c838f;
+}
+
+:root[data-theme='light'] {
+  --canvas: #f7f7f5;
+  --surface: #ffffff;
+  --border: #e3e3df;
+  --text: #1a1c20;
+  --muted: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'Instrument Sans', sans-serif;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.topbar-room {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.brand {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.room-id {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+
+.presence-list {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.presence-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.presence-swatch {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.topbar-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.topbar-controls select,
+.topbar-controls button {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  background: var(--canvas);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+}
+
+.topbar-controls button {
+  cursor: pointer;
+}
+
+.editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor-host .cm-editor {
+  height: 100%;
+}

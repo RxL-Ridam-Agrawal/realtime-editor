@@ -14,14 +14,11 @@ import * as syncProtocol from 'y-protocols/sync'
 import * as awarenessProtocol from 'y-protocols/awareness'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
+import { MSG_SYNC, MSG_AWARENESS } from './shared/protocol.js'
 
 // ---------------------------------------------------------------------------
 // Protocol constants
 // ---------------------------------------------------------------------------
-
-// Top-level message types, as used by y-websocket clients.
-const MSG_SYNC = 0
-const MSG_AWARENESS = 1
 
 // Sync sub-message types, from y-protocols/sync. We need these to tell a
 // harmless state-vector request apart from an actual document mutation.
@@ -39,8 +36,14 @@ const ROOM_IDLE_UNLOAD_MS = 30_000
 // Persistence — swap these two functions for Postgres later
 // ---------------------------------------------------------------------------
 
-import Database from 'better-sqlite3'
-const db = new Database('rooms.db')
+// node:sqlite over better-sqlite3: no native compilation, one less
+// dependency. Node's own docs still flag it experimental (an
+// ExperimentalWarning fires on import), but functionally verified — BLOB
+// round-tripping and ON CONFLICT upserts both work correctly on Node 24.13
+// (see Phase 4 report). Low-stakes trade for a localhost learning project;
+// swap back to better-sqlite3 if a future Node version breaks this.
+import { DatabaseSync } from 'node:sqlite'
+const db = new DatabaseSync('rooms.db')
 db.exec(`
   CREATE TABLE IF NOT EXISTS rooms (
     id            TEXT PRIMARY KEY,
@@ -55,7 +58,15 @@ db.exec(`
 `)
 
 const selectDoc = db.prepare('SELECT ydoc FROM rooms WHERE id = ?')
-const updateDoc = db.prepare('UPDATE rooms SET ydoc = ?, updated_at = ? WHERE id = ?')
+// INSERT ... ON CONFLICT, not UPDATE: a room created via POST /api/rooms
+// never gets an INSERTed row (that endpoint only mints an ID), so a plain
+// UPDATE would match zero rows and silently never persist anything. This
+// upsert is what actually "wires the schema" for Phase 4.
+const upsertDoc = db.prepare(`
+  INSERT INTO rooms (id, ydoc, created_at, updated_at)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET ydoc = excluded.ydoc, updated_at = excluded.updated_at
+`)
 
 function loadDoc (roomId, doc) {
   const row = selectDoc.get(roomId)
@@ -63,7 +74,8 @@ function loadDoc (roomId, doc) {
 }
 
 function saveDoc (roomId, doc) {
-  updateDoc.run(Buffer.from(Y.encodeStateAsUpdate(doc)), Date.now(), roomId)
+  const now = Date.now()
+  upsertDoc.run(roomId, Buffer.from(Y.encodeStateAsUpdate(doc)), now, now)
 }
 
 // ---------------------------------------------------------------------------
@@ -182,12 +194,15 @@ function getRoom (id) {
 const wss = new WebSocketServer({ noServer: true })
 
 /**
- * TODO(you): verify the JWT minted by POST /api/rooms/:id/token.
- * Must return null on any failure, and check `expires_at` on the room.
+ * Phase 3 stub: no tokens yet, no viewer role yet (that's Phase 5). Just
+ * pull the room ID out of the upgrade request's URL — the client connects
+ * its WebSocket to the same `/r/:roomId` path the page itself lives at.
  * @returns {{ roomId: string, role: 'editor'|'viewer' } | null}
  */
 function authenticate (request) {
-  throw new Error('not implemented')
+  const match = /^\/r\/([^/?]+)/.exec(request.url)
+  if (!match) return null
+  return { roomId: match[1], role: 'editor' }
 }
 
 wss.on('connection', (conn, request, session) => {
