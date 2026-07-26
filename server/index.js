@@ -1,7 +1,8 @@
 import Fastify from 'fastify'
 import { nanoid } from 'nanoid'
-import { attach } from '../server.js'
+import { attach, createRoomRow, getRoomState, keepRoomAlive } from '../server.js'
 import { SERVER_PORT } from '../shared/config.js'
+import { resolveTtlMs } from '../shared/ttl.js'
 
 const app = Fastify({ logger: true })
 
@@ -15,12 +16,32 @@ app.addHook('onRequest', (request, reply, done) => {
   done()
 })
 
-app.options('/api/rooms', (request, reply) => {
+app.options('/api/*', (request, reply) => {
   reply.code(204).send()
 })
 
-app.post('/api/rooms', async () => {
-  return { roomId: nanoid(10) }
+app.post('/api/rooms', async (request) => {
+  const roomId = nanoid(10)
+  createRoomRow(roomId, resolveTtlMs(request.body?.ttl))
+  return { roomId }
+})
+
+// Lets the client show "this room expired on <date>" distinctly from a
+// typo'd/never-existed ID, and drives the countdown UI.
+app.get('/api/rooms/:id', async (request, reply) => {
+  const state = getRoomState(request.params.id)
+  if (state.state === 'not-found') reply.code(404)
+  return state
+})
+
+// "Keep this room" — resets the idle countdown without requiring an edit.
+app.post('/api/rooms/:id/keep-alive', async (request, reply) => {
+  const ok = keepRoomAlive(request.params.id)
+  if (!ok) {
+    reply.code(404)
+    return { error: 'not-found-or-expired' }
+  }
+  return { ok: true }
 })
 
 await app.listen({ port: SERVER_PORT, host: '0.0.0.0' })

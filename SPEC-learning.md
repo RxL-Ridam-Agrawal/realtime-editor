@@ -260,3 +260,167 @@ that works with two clients but not three, saves that never fire, read-only that
 isn't. No phase is done on inspection. Every acceptance criterion gets
 demonstrated with output you observed, and anything unverified gets reported as
 unverified rather than assumed working.
+
+# Phase 6 — Document expiration (feature 18)
+
+Insert this into `SPEC.md`, replacing the "Feature 18, expiration" entry under
+**Deferred**. Do this phase after Phase 4 (persistence) — it depends on the save
+path existing. It can be done before or after Phase 5 (read-only).
+
+## Semantics: idle expiry, not fixed
+
+A room expires after a period with **no edits**, not a fixed period after
+creation. Fixed lifetimes delete documents people are actively working in, which
+is surprising and destructive. Idle expiry collects abandoned rooms and leaves
+live ones alone.
+
+Effective expiry is **derived, not stored**: `updated_at + ttl_ms`. The save path
+in `server.js` already bumps `updated_at` on every debounced write, so activity
+tracking needs no new code.
+
+Only **edits** count as activity. A viewer sitting on a read-only link, or an
+editor connected but idle, does not keep a room alive. This is a deliberate
+choice: it means activity is exactly "the document changed," which is what the
+existing save path already measures.
+
+## Schema change
+
+```sql
+ALTER TABLE rooms ADD COLUMN ttl_ms    INTEGER;  -- NULL = never expires
+ALTER TABLE rooms ADD COLUMN expired_at INTEGER; -- NULL = live; set = tombstone
+```
+
+Store all times as **epoch milliseconds, UTC**. SQLite has no date type; do not
+store ISO strings or local time.
+
+TTL options at room creation: 1 hour, 24 hours, 7 days, 30 days, never. Default
+to 7 days. `never` stores `NULL`.
+
+## Tombstones, not hard deletes
+
+Do not delete the row. Instead:
+
+```sql
+UPDATE rooms SET ydoc = NULL, expired_at = ? WHERE id = ?
+```
+
+This drops the document blob — the only part that's actually large or sensitive —
+while keeping roughly a hundred bytes of metadata. The payoff is that an expired
+room can say "This room expired on 12 March" instead of being indistinguishable
+from a typo. That distinction matters a lot to someone who just lost work.
+
+Sweep tombstones themselves after 30 days with a hard `DELETE`.
+
+## Prerequisite: fix the ghost-room bug
+
+`getRoom()` currently constructs a `Room` for any ID. For an ID not in the
+database, `loadDoc()` finds nothing and returns silently, then `saveDoc()` runs
+`UPDATE ... WHERE id = ?`, matches zero rows, and succeeds. The user types into a
+fully functional-looking editor and loses everything on close.
+
+Expiration makes this a correctness requirement, because an expired room would
+behave exactly the same way. Two fixes, both required:
+
+1. **`authenticate()` must verify existence and liveness before the upgrade is
+   accepted** — not after, or you've already loaded a doc into memory. It should
+   reject when: no row exists, `expired_at IS NOT NULL`, or
+   `ttl_ms IS NOT NULL AND updated_at + ttl_ms < now`.
+2. **`saveDoc()` must check the result.** `changes === 0` means the row vanished
+   underneath a live room. Log it as an error; do not treat it as a successful
+   save. This is the tripwire that catches every ordering mistake below.
+
+## The sweeper
+
+A plain `setInterval`, every 10 minutes. Do not add `node-cron` — this is one
+line of standard library.
+
+Run it **once at startup** as well, since the process may have been down through
+a room's expiry window.
+
+Store the interval handle and `clearInterval` it in the existing `SIGINT`/`SIGTERM`
+handler, so shutdown isn't delayed.
+
+## Evicting a room that is currently open
+
+This is the part that breaks naive implementations. A room can expire while
+sockets are attached to it. The `Room` object is in memory, its debounced save is
+pending, and the sweeper is about to invalidate the row underneath it.
+
+**Required order.** Any other ordering loses data or resurrects the room:
+
+1. Skip the tombstone write if the room is loaded and has connections — unless it
+   is genuinely expired, in which case proceed to evict rather than skip. A room
+   that is merely loaded must never be silently deleted from under itself.
+2. Cancel the room's pending save timer. Do **not** flush it — the document is
+   expiring; writing it back moments before nulling the blob is pointless and
+   racy.
+3. Close every connection with code **4001** and reason `room expired`.
+4. `doc.destroy()` and `rooms.delete(id)`.
+5. Only now write the tombstone.
+
+If you invert 4 and 5, an in-flight update can re-create state after the
+tombstone. If you use `INSERT OR REPLACE` anywhere in the save path, the room
+resurrects itself and never dies.
+
+## Client behaviour
+
+WebSocket close code **4001** is terminal. The client must:
+
+- Set the provider to stop reconnecting (`provider.shouldConnect = false`, then
+  `provider.disconnect()`). **`y-websocket` auto-reconnects by default**, so
+  without this you get a reconnect loop hammering a room that no longer exists.
+- Put the editor into a read-only terminal state — do not clear the buffer. The
+  text on screen may be the user's only remaining copy.
+- Offer "Copy all" and "Download as file" prominently. This is the one screen in
+  the app where the user might be about to lose something irreplaceable.
+- Clear the room's `y-indexeddb` store so the stale local copy doesn't
+  resurrect on refresh into a half-broken state.
+
+Codes in the 4000–4999 range are reserved for application use; 4001 is our
+choice, not a standard.
+
+## UI
+
+Show remaining lifetime in the mono utility text: "Deletes in 6 days",
+"Deletes in 4 hours", "Deletes in 12 minutes". Phrase it as consequence, not
+mechanism — not "TTL 604800s", not "expires_at 1773532800".
+
+Because expiry is idle-based, the countdown resets when anyone types. That's
+correct and should be visible: the number jumping back to its maximum on the
+first keystroke teaches the model better than any tooltip.
+
+A **"Keep this room"** control resets `updated_at` to now. Anyone with the link
+can use it — access control is out of scope for this build. One line of SQL.
+
+**Amendment to the design direction.** `SPEC.md` reserves the amber accent
+(`#E0A34E`) exclusively for sync and save state. Broaden that rule to
+**time-sensitive system state**, covering imminent expiry. Under one hour
+remaining, the countdown takes the accent. This is a real broadening, not a
+loophole: both cases are "the system is about to do something to your document,"
+which is exactly what that colour should mean. Nothing else gains access to it.
+
+## Acceptance criteria
+
+Demonstrate each with output you actually observed.
+
+1. A room with `ttl_ms` set and `updated_at` far in the past is refused at
+   connect time, and the sweeper tombstones it. Show the terminal output.
+2. **The eviction race.** Connect two clients, then force the sweeper to expire
+   that room while both are attached. Both sockets close with 4001, neither
+   reconnects, and no `changes === 0` error appears in the log. That last part is
+   what proves the ordering is right.
+3. Editing a room resets its countdown — verify by reading `updated_at` from the
+   database before and after.
+4. A room with `ttl_ms IS NULL` is never touched by the sweeper. Run the sweeper
+   against a deliberately ancient never-expiring room and show that it survives.
+5. A tombstoned room's URL renders "This room expired on <date>", distinct from
+   the not-found page for a typo'd ID.
+6. `SIGTERM` during an active edit still flushes, and the sweeper interval does
+   not delay shutdown.
+
+## Note on why this is worth building
+
+The feature itself is about thirty lines. The value is in criterion 2 — a
+lifecycle bug where a background job mutates state that a live in-memory object
+still owns. That class of bug is everywhere in real systems, it's invisible under
+casual testing, and here it's small enough to see whole.

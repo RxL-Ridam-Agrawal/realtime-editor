@@ -65,13 +65,16 @@ const baseExtensions = [
 export function createEditor ({ parent, ytext, awareness, theme = 'dark', readOnly = false }) {
   const languageCompartment = new Compartment()
   const themeCompartment = new Compartment()
+  // Unlike Phase 5's viewer/editor role (fixed for the session, tied to
+  // which URL was opened), a room can go read-only mid-session when it
+  // expires — so this needs a Compartment now, reconfigured rather than
+  // fixed at creation. Still a UX affordance only; enforcement is
+  // server-side.
+  const readOnlyCompartment = new Compartment()
 
-  // Fixed for the whole session (tied to which URL — /r/:id vs
-  // /r/:id/view — the person opened), so a plain conditional extension is
-  // enough; no Compartment needed. This is a UX affordance only — the real
-  // enforcement is server-side (see server.js's read-only gate), since
-  // anyone can open devtools and ignore this.
-  const readOnlyExtensions = readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []
+  function readOnlyExtensions (value) {
+    return value ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []
+  }
 
   const state = EditorState.create({
     doc: ytext.toString(),
@@ -81,7 +84,7 @@ export function createEditor ({ parent, ytext, awareness, theme = 'dark', readOn
       yCollab(ytext, awareness),
       languageCompartment.of([]),
       themeCompartment.of(getTheme(theme)),
-      readOnlyExtensions
+      readOnlyCompartment.of(readOnlyExtensions(readOnly))
     ]
   })
 
@@ -99,6 +102,9 @@ export function createEditor ({ parent, ytext, awareness, theme = 'dark', readOn
     },
     setTheme (mode) {
       view.dispatch({ effects: themeCompartment.reconfigure(getTheme(mode)) })
+    },
+    setReadOnly (value) {
+      view.dispatch({ effects: readOnlyCompartment.reconfigure(readOnlyExtensions(value)) })
     }
   }
 }

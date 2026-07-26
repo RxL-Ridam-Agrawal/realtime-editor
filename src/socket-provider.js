@@ -2,7 +2,7 @@ import * as syncProtocol from 'y-protocols/sync'
 import * as awarenessProtocol from 'y-protocols/awareness'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
-import { MSG_SYNC, MSG_AWARENESS } from '../shared/protocol.js'
+import { MSG_SYNC, MSG_AWARENESS, ROOM_EXPIRED_CLOSE_CODE } from '../shared/protocol.js'
 
 const RECONNECT_DELAY_MS = 1000
 
@@ -12,12 +12,21 @@ const RECONNECT_DELAY_MS = 1000
  * dependency list, and since the server here is hand-rolled rather than
  * `y-websocket`'s own server, this is a thin hand-rolled counterpart using
  * the same y-protocols/sync + y-protocols/awareness + lib0 wire format.
+ * @param {string} url
+ * @param {import('yjs').Doc} doc
+ * @param {any} awareness
+ * @param {{ onExpired?: () => void }} [opts] onExpired fires once, when the
+ *   server closes with the room-expired code. y-websocket-style providers
+ *   auto-reconnect by default; without explicitly checking for this code
+ *   and refusing to reconnect, the client would hammer a room that no
+ *   longer exists in a reconnect loop.
  */
 export class SocketProvider {
-  constructor (url, doc, awareness) {
+  constructor (url, doc, awareness, opts = {}) {
     this.url = url
     this.doc = doc
     this.awareness = awareness
+    this.onExpired = opts.onExpired
     this.socket = null
     this.shouldReconnect = true
 
@@ -57,12 +66,18 @@ export class SocketProvider {
       this._handleMessage(new Uint8Array(event.data))
     })
 
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (event) => {
       this.socket = null
       // A broken socket means we can no longer vouch for any remote peer's
       // presence — drop them locally so they don't linger as ghost cursors.
       const remoteIds = [...this.awareness.getStates().keys()].filter((id) => id !== this.doc.clientID)
       if (remoteIds.length) awarenessProtocol.removeAwarenessStates(this.awareness, remoteIds, this)
+
+      if (event.code === ROOM_EXPIRED_CLOSE_CODE) {
+        this.shouldReconnect = false
+        this.onExpired?.()
+        return
+      }
       if (this.shouldReconnect) setTimeout(() => this._connect(), RECONNECT_DELAY_MS)
     })
 

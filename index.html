@@ -6,7 +6,28 @@
     <title>Collaborative code editor</title>
   </head>
   <body>
-    <div class="app">
+    <section id="landing" class="landing" hidden>
+      <h1>Collaborative code editor</h1>
+      <p class="landing-sub">Anyone with the link can edit. Rooms disappear on their own after a while — pick how long.</p>
+      <label class="landing-field">
+        Delete this room after
+        <select id="ttl-select" aria-label="Room lifetime"></select>
+      </label>
+      <button id="create-room-button" type="button">Create room</button>
+    </section>
+
+    <section id="not-found-view" class="message-view" hidden>
+      <h1>Room not found</h1>
+      <p>There's no room at this link. Check it was copied correctly, or <a href="/">create a new room</a>.</p>
+    </section>
+
+    <section id="expired-view" class="message-view" hidden>
+      <h1>This room expired</h1>
+      <p id="expired-view-date"></p>
+      <p><a href="/">Create a new room</a> to keep working.</p>
+    </section>
+
+    <div id="app" class="app" hidden>
       <header class="topbar">
         <div class="topbar-room">
           <span class="brand">Collaborative code editor</span>
@@ -18,12 +39,27 @@
         </div>
         <ul id="presence-list" class="presence-list" aria-label="Who's connected"></ul>
         <div class="topbar-controls">
+          <span id="countdown" class="countdown"></span>
+          <button id="keep-alive-button" class="room-id" type="button" hidden>Keep this room</button>
           <select id="language-select" aria-label="Language"></select>
           <button id="theme-toggle" type="button" aria-label="Toggle dark or light theme"></button>
         </div>
       </header>
+
+      <div id="expired-banner" class="expired-banner" hidden>
+        <div>
+          <strong>This room expired.</strong> The text below may be your only remaining copy — it's still on screen,
+          just no longer editable or synced.
+        </div>
+        <div class="expired-banner-actions">
+          <button id="copy-all-button" type="button">Copy all</button>
+          <button id="download-button" type="button">Download as file</button>
+        </div>
+      </div>
+
       <main id="editor-host" class="editor-host"></main>
     </div>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

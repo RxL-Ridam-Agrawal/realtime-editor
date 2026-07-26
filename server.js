@@ -10,7 +10,7 @@ import * as syncProtocol from 'y-protocols/sync'
 import * as awarenessProtocol from 'y-protocols/awareness'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
-import { MSG_SYNC, MSG_AWARENESS } from './shared/protocol.js'
+import { MSG_SYNC, MSG_AWARENESS, ROOM_EXPIRED_CLOSE_CODE } from './shared/protocol.js'
 
 // ---------------------------------------------------------------------------
 // Protocol constants
@@ -54,25 +54,74 @@ db.exec(`
   )
 `)
 
+// Phase 6: idle-expiry columns. ALTER TABLE ADD COLUMN errors if the column
+// already exists, so guard it — this runs on every startup.
+// ttl_ms: NULL = never expires. expired_at: NULL = live, set = tombstone.
+{
+  const existingColumns = new Set(db.prepare('PRAGMA table_info(rooms)').all().map((c) => c.name))
+  if (!existingColumns.has('ttl_ms')) db.exec('ALTER TABLE rooms ADD COLUMN ttl_ms INTEGER')
+  if (!existingColumns.has('expired_at')) db.exec('ALTER TABLE rooms ADD COLUMN expired_at INTEGER')
+}
+
 const selectDoc = db.prepare('SELECT ydoc FROM rooms WHERE id = ?')
-// INSERT ... ON CONFLICT, not UPDATE: a room created via POST /api/rooms
-// never gets an INSERTed row (that endpoint only mints an ID), so a plain
-// UPDATE would match zero rows and silently never persist anything. This
-// upsert is what actually "wires the schema" for Phase 4.
-const upsertDoc = db.prepare(`
-  INSERT INTO rooms (id, ydoc, created_at, updated_at)
-  VALUES (?, ?, ?, ?)
-  ON CONFLICT(id) DO UPDATE SET ydoc = excluded.ydoc, updated_at = excluded.updated_at
-`)
+const selectRoomMeta = db.prepare('SELECT ttl_ms, expired_at, updated_at FROM rooms WHERE id = ?')
+const insertRoom = db.prepare('INSERT INTO rooms (id, ttl_ms, created_at, updated_at) VALUES (?, ?, ?, ?)')
+const updateDoc = db.prepare('UPDATE rooms SET ydoc = ?, updated_at = ? WHERE id = ?')
+const tombstoneRoom = db.prepare('UPDATE rooms SET ydoc = NULL, expired_at = ? WHERE id = ?')
+const touchRoom = db.prepare('UPDATE rooms SET updated_at = ? WHERE id = ? AND expired_at IS NULL')
+const selectExpiredCandidates = db.prepare(
+  'SELECT id FROM rooms WHERE expired_at IS NULL AND ttl_ms IS NOT NULL AND updated_at + ttl_ms < ?'
+)
+const deleteOldTombstones = db.prepare('DELETE FROM rooms WHERE expired_at IS NOT NULL AND expired_at < ?')
 
 function loadDoc (roomId, doc) {
   const row = selectDoc.get(roomId)
   if (row?.ydoc) Y.applyUpdate(doc, new Uint8Array(row.ydoc), 'persistence')
 }
 
+// Phase 6 prerequisite fix: this used to be an upsert, which papered over
+// the real bug — POST /api/rooms never inserted a row, so any made-up room
+// ID got a fully working, silently-never-persisted room (the "ghost room"
+// bug). Room creation now inserts the row (see createRoomRow), and
+// authenticate() verifies it exists before a socket is ever accepted — so a
+// plain UPDATE is correct again, and changes === 0 becomes a real tripwire:
+// it means the row vanished out from under a room that's still live.
 function saveDoc (roomId, doc) {
   const now = Date.now()
-  upsertDoc.run(roomId, Buffer.from(Y.encodeStateAsUpdate(doc)), now, now)
+  const result = updateDoc.run(Buffer.from(Y.encodeStateAsUpdate(doc)), now, roomId)
+  if (result.changes === 0) {
+    console.error(`[room ${roomId}] save affected 0 rows — its row vanished while the room was still live`)
+  }
+}
+
+/** Called by POST /api/rooms right after minting the ID. @param {number|null} ttlMs */
+export function createRoomRow (roomId, ttlMs) {
+  const now = Date.now()
+  insertRoom.run(roomId, ttlMs, now, now)
+}
+
+/**
+ * For GET /api/rooms/:id — lets the client show "this room expired on
+ * <date>" distinctly from a plain not-found, and drive the countdown UI.
+ * Effective expiry is derived (updated_at + ttl_ms), not just the stored
+ * tombstone, so a room that's aged out but hasn't been swept yet still
+ * reports as expired.
+ */
+export function getRoomState (roomId) {
+  const row = selectRoomMeta.get(roomId)
+  if (!row) return { state: 'not-found' }
+  if (row.expired_at !== null) return { state: 'expired', expiredAt: row.expired_at }
+  const derivedExpiry = row.ttl_ms !== null ? row.updated_at + row.ttl_ms : null
+  if (derivedExpiry !== null && derivedExpiry < Date.now()) {
+    return { state: 'expired', expiredAt: derivedExpiry }
+  }
+  return { state: 'active', updatedAt: row.updated_at, ttlMs: row.ttl_ms }
+}
+
+/** For the "Keep this room" control — resets the idle countdown without an edit. */
+export function keepRoomAlive (roomId) {
+  const result = touchRoom.run(Date.now(), roomId)
+  return result.changes > 0
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +144,11 @@ class Room {
     this.saveTimer = null
     this.saveDeadline = null
     this.unloadTimer = null
+    // Set by evictRoom(). Guards flush()/removeConn() against a 'close' or
+    // 'message' event that was already in flight when eviction ran — without
+    // this, a stale event firing after doc.destroy() would try to save a
+    // destroyed doc, or re-schedule a save that resurrects a tombstoned row.
+    this.evicted = false
 
     loadDoc(id, this.doc)
 
@@ -137,6 +191,7 @@ class Room {
   }
 
   flush () {
+    if (this.evicted) return
     clearTimeout(this.saveTimer)
     this.saveTimer = null
     this.saveDeadline = null
@@ -154,6 +209,7 @@ class Room {
   }
 
   removeConn (conn) {
+    if (this.evicted) return
     const clientIDs = this.conns.get(conn)
     if (clientIDs?.size) {
       awarenessProtocol.removeAwarenessStates(this.awareness, [...clientIDs], null)
@@ -175,6 +231,46 @@ class Room {
   }
 }
 
+/**
+ * Evicts a room per SPEC-learning.md's required order — inverting steps 4
+ * and 5 lets an in-flight update re-create state after the tombstone,
+ * and skipping the timer cancellation risks a debounced save writing the
+ * doc back moments after its blob is nulled.
+ */
+function evictRoom (roomId, now) {
+  const room = rooms.get(roomId)
+  if (room) {
+    room.evicted = true // 1. mark first, so any in-flight close/message event no-ops
+    clearTimeout(room.saveTimer) // 2. cancel the pending save — do NOT flush it
+    room.saveTimer = null
+    room.saveDeadline = null
+    clearTimeout(room.unloadTimer)
+    room.unloadTimer = null
+    for (const conn of room.conns.keys()) conn.close(ROOM_EXPIRED_CLOSE_CODE, 'room expired') // 3.
+    room.conns.clear()
+    room.doc.destroy() // 4.
+    rooms.delete(roomId)
+  }
+  tombstoneRoom.run(now, roomId) // 5. only now write the tombstone
+}
+
+/**
+ * Sweeps rooms whose derived expiry (updated_at + ttl_ms) has passed, and
+ * hard-deletes tombstones past their own 30-day retention window. Runs on
+ * an interval and once at startup, since the process may have been down
+ * through a room's entire expiry window.
+ */
+// Overridable for testing the eviction race without waiting 10 real
+// minutes — same code path either way, just a different interval.
+const SWEEP_INTERVAL_MS = Number(process.env.SWEEP_INTERVAL_MS) || 10 * 60 * 1000
+const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+
+function sweepExpiredRooms () {
+  const now = Date.now()
+  for (const { id } of selectExpiredCandidates.all(now)) evictRoom(id, now)
+  deleteOldTombstones.run(now - TOMBSTONE_RETENTION_MS)
+}
+
 function getRoom (id) {
   let room = rooms.get(id)
   if (!room) {
@@ -191,16 +287,26 @@ function getRoom (id) {
 const wss = new WebSocketServer({ noServer: true })
 
 /**
- * Phase 3 stub: no tokens yet, no viewer role yet (that's Phase 5). Just
- * pull the room ID out of the upgrade request's URL — the client connects
- * its WebSocket to the same `/r/:roomId` path the page itself lives at.
+ * No tokens yet (that's the deferred password-protection feature). Pulls
+ * the room ID out of the upgrade request's URL and verifies the room both
+ * exists and is live — before the upgrade is accepted, not after (accepting
+ * first would mean a doc is already loaded into memory for a room that
+ * shouldn't exist). Existence alone was the Phase 6 prerequisite fix;
+ * liveness is the expiry check proper: reject if tombstoned, or if its
+ * derived expiry (updated_at + ttl_ms) has already passed even though the
+ * sweeper hasn't caught up to it yet.
  * @returns {{ roomId: string, role: 'editor'|'viewer' } | null}
  */
 function authenticate (request) {
   const path = request.url.split('?')[0]
   const match = /^\/r\/([^/]+)(\/view)?\/?$/.exec(path)
   if (!match) return null
-  return { roomId: match[1], role: match[2] ? 'viewer' : 'editor' }
+  const roomId = match[1]
+  const meta = selectRoomMeta.get(roomId)
+  if (!meta) return null
+  if (meta.expired_at !== null) return null
+  if (meta.ttl_ms !== null && meta.updated_at + meta.ttl_ms < Date.now()) return null
+  return { roomId, role: match[2] ? 'viewer' : 'editor' }
 }
 
 wss.on('connection', (conn, request, session) => {
@@ -232,6 +338,10 @@ wss.on('connection', (conn, request, session) => {
   }
 
   conn.on('message', (data) => {
+    // The room may have been evicted between this message being sent and
+    // being processed (its socket close is already in flight) — a stale
+    // message reaching a destroyed doc would throw or resurrect the room.
+    if (room.evicted) return
     let message
     try {
       message = new Uint8Array(data)
@@ -301,6 +411,16 @@ setInterval(() => {
 }, 30_000)
 
 // ---------------------------------------------------------------------------
+// Expiration sweeper
+// ---------------------------------------------------------------------------
+
+// Once at startup too — the process may have been down through a room's
+// entire expiry window, so relying on the interval alone would leave it
+// live until the next tick.
+sweepExpiredRooms()
+const sweepIntervalHandle = setInterval(sweepExpiredRooms, SWEEP_INTERVAL_MS)
+
+// ---------------------------------------------------------------------------
 // HTTP upgrade — authenticate BEFORE accepting the socket
 // ---------------------------------------------------------------------------
 
@@ -319,9 +439,11 @@ export function attach (server) {
   })
 }
 
-// Flush everything on shutdown or a deploy loses unsaved edits.
+// Flush everything on shutdown or a deploy loses unsaved edits. Clear the
+// sweeper interval too, so shutdown isn't delayed by it.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
+    clearInterval(sweepIntervalHandle)
     for (const room of rooms.values()) room.flush()
     process.exit(0)
   })
