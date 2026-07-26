@@ -1,11 +1,7 @@
 /**
  * Minimal Yjs WebSocket server — relay + persistence + read-only enforcement.
  *
- *   npm i ws yjs y-protocols lib0 better-sqlite3
- *
- * This is a skeleton, not finished code. Sections marked TODO are yours.
- * VERIFY the y-protocols sync sub-message constants against your installed
- * version before trusting the read-only path (see SYNC_STEP_1 below).
+ *   npm i ws yjs y-protocols lib0
  */
 
 import { WebSocketServer } from 'ws'
@@ -20,13 +16,14 @@ import { MSG_SYNC, MSG_AWARENESS } from './shared/protocol.js'
 // Protocol constants
 // ---------------------------------------------------------------------------
 
-// Sync sub-message types, from y-protocols/sync. We need these to tell a
-// harmless state-vector request apart from an actual document mutation.
-// If a future y-protocols renumbers these, read-only silently breaks — so
-// prefer the exported constants if your version provides them.
-const SYNC_STEP_1 = 0 // client asks "what do you have?"  -> safe for viewers
-const SYNC_STEP_2 = 1 // client sends missing updates      -> mutation
-const SYNC_UPDATE = 2 // client sends a live edit          -> mutation
+// Sync sub-message types. Verified against the installed y-protocols
+// (node_modules/y-protocols/sync.js) rather than trusted from memory:
+// messageYjsSyncStep1 = 0, messageYjsSyncStep2 = 1, messageYjsUpdate = 2.
+// This version exports the real constants, so we use those directly instead
+// of hand-copied numbers — a future renumbering can't silently break this.
+const SYNC_STEP_1 = syncProtocol.messageYjsSyncStep1 // client asks "what do you have?" -> safe for viewers
+const SYNC_STEP_2 = syncProtocol.messageYjsSyncStep2 // client sends missing updates      -> mutation
+const SYNC_UPDATE = syncProtocol.messageYjsUpdate // client sends a live edit          -> mutation
 
 const SAVE_DEBOUNCE_MS = 2_000
 const SAVE_MAX_WAIT_MS = 10_000
@@ -200,9 +197,10 @@ const wss = new WebSocketServer({ noServer: true })
  * @returns {{ roomId: string, role: 'editor'|'viewer' } | null}
  */
 function authenticate (request) {
-  const match = /^\/r\/([^/?]+)/.exec(request.url)
+  const path = request.url.split('?')[0]
+  const match = /^\/r\/([^/]+)(\/view)?\/?$/.exec(path)
   if (!match) return null
-  return { roomId: match[1], role: 'editor' }
+  return { roomId: match[1], role: match[2] ? 'viewer' : 'editor' }
 }
 
 wss.on('connection', (conn, request, session) => {

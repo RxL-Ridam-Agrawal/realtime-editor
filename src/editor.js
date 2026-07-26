@@ -60,11 +60,18 @@ const baseExtensions = [
 ]
 
 /**
- * @param {{ parent: HTMLElement, ytext: import('yjs').Text, awareness: any, theme?: 'dark'|'light' }} opts
+ * @param {{ parent: HTMLElement, ytext: import('yjs').Text, awareness: any, theme?: 'dark'|'light', readOnly?: boolean }} opts
  */
-export function createEditor ({ parent, ytext, awareness, theme = 'dark' }) {
+export function createEditor ({ parent, ytext, awareness, theme = 'dark', readOnly = false }) {
   const languageCompartment = new Compartment()
   const themeCompartment = new Compartment()
+
+  // Fixed for the whole session (tied to which URL — /r/:id vs
+  // /r/:id/view — the person opened), so a plain conditional extension is
+  // enough; no Compartment needed. This is a UX affordance only — the real
+  // enforcement is server-side (see server.js's read-only gate), since
+  // anyone can open devtools and ignore this.
+  const readOnlyExtensions = readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []
 
   const state = EditorState.create({
     doc: ytext.toString(),
@@ -73,7 +80,8 @@ export function createEditor ({ parent, ytext, awareness, theme = 'dark' }) {
       keymap.of([...yUndoManagerKeymap, indentWithTab]),
       yCollab(ytext, awareness),
       languageCompartment.of([]),
-      themeCompartment.of(getTheme(theme))
+      themeCompartment.of(getTheme(theme)),
+      readOnlyExtensions
     ]
   })
 

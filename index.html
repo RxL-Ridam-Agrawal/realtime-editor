@@ -11,6 +11,10 @@
         <div class="topbar-room">
           <span class="brand">Collaborative code editor</span>
           <button id="room-id" class="room-id" type="button" aria-label="Copy room link"></button>
+          <button id="view-link" class="room-id" type="button" aria-label="Copy a read-only link to this room" hidden>
+            Copy view-only link
+          </button>
+          <span id="readonly-badge" class="readonly-badge" hidden>Viewing — read only</span>
         </div>
         <ul id="presence-list" class="presence-list" aria-label="Who's connected"></ul>
         <div class="topbar-controls">

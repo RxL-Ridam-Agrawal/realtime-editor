@@ -84,6 +84,12 @@ body {
   cursor: pointer;
 }
 
+.readonly-badge {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 .presence-list {
   display: flex;
   align-items: center;

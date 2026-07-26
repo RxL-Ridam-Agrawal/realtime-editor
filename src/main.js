@@ -15,6 +15,8 @@ const languageSelect = document.getElementById('language-select')
 const themeToggle = document.getElementById('theme-toggle')
 const editorHost = document.getElementById('editor-host')
 const roomIdButton = document.getElementById('room-id')
+const viewLinkButton = document.getElementById('view-link')
+const readonlyBadge = document.getElementById('readonly-badge')
 const presenceListEl = document.getElementById('presence-list')
 
 function populateLanguageSelect () {
@@ -49,14 +51,21 @@ function showFatalError (message) {
   editorHost.textContent = message
 }
 
+function parseRoute () {
+  const match = /^\/r\/([^/]+)(\/view)?\/?$/.exec(location.pathname)
+  if (!match) return null
+  return { roomId: match[1], readOnly: Boolean(match[2]) }
+}
+
 /**
- * Returns the room ID from the URL, or creates a new room and navigates to
- * it. The navigation case returns a promise that never resolves, so the
- * caller never builds an editor for a page that's about to be replaced.
+ * Returns { roomId, readOnly } from the URL, or creates a new room and
+ * navigates to its editor URL. The navigation case returns a promise that
+ * never resolves, so the caller never builds an editor for a page that's
+ * about to be replaced.
  */
-async function ensureRoomId () {
-  const match = /^\/r\/([^/]+)/.exec(location.pathname)
-  if (match) return match[1]
+async function ensureRoute () {
+  const route = parseRoute()
+  if (route) return route
 
   const response = await fetch(`http://${location.hostname}:${SERVER_PORT}/api/rooms`, { method: 'POST' })
   if (!response.ok) throw new Error(`Could not create a room (server said ${response.status}).`)
@@ -65,28 +74,41 @@ async function ensureRoomId () {
   return new Promise(() => {})
 }
 
-function wireRoomIdButton (roomId) {
-  roomIdButton.textContent = roomId
-  roomIdButton.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(location.href)
-    roomIdButton.textContent = 'Copied'
-    setTimeout(() => { roomIdButton.textContent = roomId }, 1200)
+function copyToClipboard (button, text) {
+  button.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(text)
+    const original = button.textContent
+    button.textContent = 'Copied'
+    setTimeout(() => { button.textContent = original }, 1200)
   })
+}
+
+function wireRoomLinks (roomId, readOnly) {
+  roomIdButton.textContent = roomId
+  copyToClipboard(roomIdButton, location.href)
+
+  if (!readOnly) {
+    viewLinkButton.hidden = false
+    const viewUrl = `${location.origin}/r/${roomId}/view`
+    copyToClipboard(viewLinkButton, viewUrl)
+  } else {
+    readonlyBadge.hidden = false
+  }
 }
 
 async function main () {
   populateLanguageSelect()
   applyTheme(DEFAULT_THEME)
 
-  let roomId
+  let roomId, readOnly
   try {
-    roomId = await ensureRoomId()
+    ({ roomId, readOnly } = await ensureRoute())
   } catch (err) {
     showFatalError(`Couldn't reach the room server. Make sure it's running (npm run server), then reload. (${err.message})`)
     return
   }
 
-  wireRoomIdButton(roomId)
+  wireRoomLinks(roomId, readOnly)
 
   const identity = getIdentity()
   const { doc, ytext, meta, awareness, persistence } = createRoomDoc(roomId)
@@ -98,12 +120,16 @@ async function main () {
   // provider (below) still merges in the room's live state once connected.
   await persistence.whenSynced
 
-  if (!meta.get('language')) meta.set('language', DEFAULT_LANGUAGE)
+  // A viewer must never attempt this write — the server drops it anyway
+  // (see server.js's read-only gate), but attempting it would leave this
+  // client's local doc believing the write succeeded when the server never
+  // applied it, silently diverging the two.
+  if (!readOnly && !meta.get('language')) meta.set('language', DEFAULT_LANGUAGE)
 
-  const wsUrl = `ws://${location.hostname}:${SERVER_PORT}/r/${roomId}`
+  const wsUrl = `ws://${location.hostname}:${SERVER_PORT}/r/${roomId}${readOnly ? '/view' : ''}`
   const provider = new SocketProvider(wsUrl, doc, awareness)
 
-  const editor = createEditor({ parent: editorHost, ytext, awareness, theme: DEFAULT_THEME })
+  const editor = createEditor({ parent: editorHost, ytext, awareness, theme: DEFAULT_THEME, readOnly })
 
   createPresenceList(presenceListEl, awareness, doc.clientID)
 
@@ -119,6 +145,11 @@ async function main () {
 
   languageSelect.value = meta.get('language')
   editor.setLanguage(meta.get('language'))
+
+  // The server would drop a viewer's language change anyway (same
+  // read-only gate as document edits — meta.set is just another Yjs doc
+  // mutation), but disabling the control avoids a confusing no-op click.
+  languageSelect.disabled = readOnly
 
   languageSelect.addEventListener('change', () => {
     meta.set('language', languageSelect.value)

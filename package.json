@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "server": "node --watch server/index.js"
+    "server": "node --watch server/index.js",
+    "test:readonly": "node server/test-readonly.mjs"
   },
   "repository": {
     "type": "git",
